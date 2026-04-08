@@ -93,9 +93,6 @@ class _BaseRabbitMQ:
 
 
 class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue, _BaseRabbitMQ):
-    """
-    Work Queue middleware.
-    """
 
     def __init__(self, host, queue_name):
         _BaseRabbitMQ.__init__(self, host)
@@ -168,11 +165,14 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue, _BaseRabbitMQ):
             self._consuming = True
             self._channel.start_consuming()
             self._consuming = False
+            self._consumer_tag = None
         except pika.exceptions.AMQPConnectionError as e:
             self._consuming = False
+            self._consumer_tag = None
             raise MessageMiddlewareDisconnectedError(str(e)) from e
         except Exception as e:
             self._consuming = False
+            self._consumer_tag = None
             raise MessageMiddlewareMessageError(str(e)) from e
 
     def stop_consuming(self):
@@ -183,10 +183,7 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue, _BaseRabbitMQ):
 
 
 class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange, _BaseRabbitMQ):
-    """
-    Direct exchange middleware with per-consumer exclusive queue bound to routing keys.
-    """
-
+    
     def __init__(self, host, exchange_name, routing_keys):
         _BaseRabbitMQ.__init__(self, host)
         self._exchange_name = exchange_name
@@ -202,22 +199,6 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange, _BaseRabbitMQ
                 durable=False,
                 auto_delete=False,
             )
-
-            self._queue_name = _random_name(f"{self._exchange_name}_q")
-            self._channel.queue_declare(
-                queue=self._queue_name,
-                durable=False,
-                exclusive=True,
-                auto_delete=True,
-            )
-
-            for key in self._routing_keys:
-                self._channel.queue_bind(
-                    exchange=self._exchange_name,
-                    queue=self._queue_name,
-                    routing_key=key,
-                )
-
             self._channel.basic_qos(prefetch_count=1)
         except pika.exceptions.AMQPConnectionError as e:
             raise MessageMiddlewareDisconnectedError(str(e)) from e
@@ -255,7 +236,19 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange, _BaseRabbitMQ
         try:
             assert self._channel is not None
             if not self._queue_name:
-                raise MessageMiddlewareMessageError("consumer queue not initialized")
+                self._queue_name = _random_name(f"{self._exchange_name}_q")
+                self._channel.queue_declare(
+                    queue=self._queue_name,
+                    durable=False,
+                    exclusive=True,
+                    auto_delete=True,
+                )
+                for key in self._routing_keys:
+                    self._channel.queue_bind(
+                        exchange=self._exchange_name,
+                        queue=self._queue_name,
+                        routing_key=key,
+                    )
 
             def _cb(ch, method, properties, body):
                 def ack():
@@ -284,11 +277,14 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange, _BaseRabbitMQ
             self._consuming = True
             self._channel.start_consuming()
             self._consuming = False
+            self._consumer_tag = None
         except pika.exceptions.AMQPConnectionError as e:
             self._consuming = False
+            self._consumer_tag = None
             raise MessageMiddlewareDisconnectedError(str(e)) from e
         except Exception as e:
             self._consuming = False
+            self._consumer_tag = None
             raise MessageMiddlewareMessageError(str(e)) from e
 
     def stop_consuming(self):
