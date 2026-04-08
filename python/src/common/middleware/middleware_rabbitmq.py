@@ -1,7 +1,7 @@
 import pika
 import random
 import string
-from typing import Callable, Optional
+from typing import Optional
 
 from .middleware import (
     MessageMiddlewareQueue,
@@ -17,7 +17,6 @@ def _random_name(prefix: str, n: int = 12) -> str:
 
 
 class _BaseRabbitMQ:
-
     def __init__(self, host: str):
         self._host = host
         self._connection: Optional[pika.BlockingConnection] = None
@@ -51,11 +50,19 @@ class _BaseRabbitMQ:
                 self._consuming = False
                 return
 
-            if self._consuming:
+            if not self._consuming:
+                return
+
+            if self._consumer_tag:
                 try:
-                    self._channel.stop_consuming()
-                finally:
-                    self._consuming = False
+                    self._channel.basic_cancel(self._consumer_tag)
+                except Exception:
+                    pass
+
+            try:
+                self._channel.stop_consuming()
+            finally:
+                self._consuming = False
         except pika.exceptions.AMQPConnectionError as e:
             raise MessageMiddlewareDisconnectedError(str(e)) from e
         except Exception as e:
@@ -68,14 +75,19 @@ class _BaseRabbitMQ:
             except Exception:
                 pass
 
-            if self._channel and self._channel.is_open:
+            if self._channel:
                 try:
-                    self._channel.close()
+                    if self._channel.is_open:
+                        self._channel.close()
                 except Exception:
                     pass
 
-            if self._connection and self._connection.is_open:
-                self._connection.close()
+            if self._connection:
+                try:
+                    if self._connection.is_open:
+                        self._connection.close()
+                except Exception:
+                    pass
         except Exception as e:
             raise MessageMiddlewareCloseError(str(e)) from e
 
@@ -83,7 +95,6 @@ class _BaseRabbitMQ:
 class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue, _BaseRabbitMQ):
     """
     Work Queue middleware.
-    Queue name is shared across producers/consumers in tests.
     """
 
     def __init__(self, host, queue_name):
@@ -93,7 +104,12 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue, _BaseRabbitMQ):
         self._ensure_connected()
         try:
             assert self._channel is not None
-            self._channel.queue_declare(queue=self._queue_name, durable=False, exclusive=False, auto_delete=False)
+            self._channel.queue_declare(
+                queue=self._queue_name,
+                durable=False,
+                exclusive=False,
+                auto_delete=False,
+            )
             self._channel.basic_qos(prefetch_count=1)
         except pika.exceptions.AMQPConnectionError as e:
             raise MessageMiddlewareDisconnectedError(str(e)) from e
@@ -105,6 +121,7 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue, _BaseRabbitMQ):
         try:
             if not isinstance(message, (bytes, bytearray)):
                 raise MessageMiddlewareMessageError("message must be bytes")
+
             assert self._channel is not None
             self._channel.basic_publish(
                 exchange="",
@@ -168,7 +185,6 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue, _BaseRabbitMQ):
 class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange, _BaseRabbitMQ):
     """
     Direct exchange middleware with per-consumer exclusive queue bound to routing keys.
-    Tests rely on bindings being created so they can query RabbitMQ Management API.
     """
 
     def __init__(self, host, exchange_name, routing_keys):
@@ -188,10 +204,19 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange, _BaseRabbitMQ
             )
 
             self._queue_name = _random_name(f"{self._exchange_name}_q")
-            self._channel.queue_declare(queue=self._queue_name, durable=False, exclusive=True, auto_delete=True)
+            self._channel.queue_declare(
+                queue=self._queue_name,
+                durable=False,
+                exclusive=True,
+                auto_delete=True,
+            )
 
             for key in self._routing_keys:
-                self._channel.queue_bind(exchange=self._exchange_name, queue=self._queue_name, routing_key=key)
+                self._channel.queue_bind(
+                    exchange=self._exchange_name,
+                    queue=self._queue_name,
+                    routing_key=key,
+                )
 
             self._channel.basic_qos(prefetch_count=1)
         except pika.exceptions.AMQPConnectionError as e:
@@ -204,7 +229,13 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange, _BaseRabbitMQ
         try:
             if not isinstance(message, (bytes, bytearray)):
                 raise MessageMiddlewareMessageError("message must be bytes")
-            routing_key = self._routing_keys[0] if self._routing_keys else ""
+
+            if len(self._routing_keys) != 1:
+                raise MessageMiddlewareMessageError(
+                    "send() requires exactly one routing key for producer instances"
+                )
+            routing_key = self._routing_keys[0]
+
             assert self._channel is not None
             self._channel.basic_publish(
                 exchange=self._exchange_name,
